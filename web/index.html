@@ -1451,15 +1451,15 @@
                     var i = 1;
                     //create untitled task
                     while (this.currentPipelineObject["staging"].find(function (task) {
-                        return task.name == "untitled" + i
+                        return task.name == "stg_untitled" + i
                     })) {
                         i++;
                     }
-                    var name = "untitled" + i
+                    var name = "stg_untitled" + i
                     var newTask = {
                         "name": name,
                         "format": "csv",
-                        "target": "raw_" + name,
+                        "target": name,
                         "location": name + "/",
                         "type": "batch",
                         "output": [
@@ -1476,11 +1476,11 @@
                     var i = 1;
                     //create untitled task
                     while (this.currentPipelineObject["standard"].find(function (task) {
-                        return task.name == "untitled" + i
+                        return task.name == "std_untitled" + i
                     })) {
                         i++;
                     }
-                    var name = "untitled" + i
+                    var name = "std_untitled" + i
                     var newTask = {
                         "name": name,
                         "sql": "select now() as ts",
@@ -1499,11 +1499,11 @@
                     var i = 1;
                     //create untitled task
                     while (this.currentPipelineObject["serving"].find(function (task) {
-                        return task.name == "untitled" + i
+                        return task.name == "srv_untitled" + i
                     })) {
                         i++;
                     }
-                    var name = "untitled" + i
+                    var name = "srv_untitled" + i
                     var newTask = {
                         "name": name,
                         "sql": "select now() as ts",

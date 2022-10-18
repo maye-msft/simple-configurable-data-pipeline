@@ -12,6 +12,12 @@ import argparse
 import time
 import tempfile
 import uuid
+import logging
+import cddp.ingestion as cddp_ingestion
+
+# disable informational messages from prophet
+logging.getLogger('py4j').setLevel(logging.ERROR)
+
 
 storage_format = "delta"
 
@@ -81,15 +87,8 @@ def start_staging_job(spark, config, task, timeout=None):
     format = task["format"]
     landing_path = config["landing_path"]
     staging_path = config["staging_path"]
-    if type == "streaming":
-        df = spark \
-            .readStream \
-            .format(format) \
-            .option("multiline", "true") \
-            .option("header", "true") \
-            .schema(schema) \
-            .load(landing_path+"/"+location)    
-
+    df, is_streaming = cddp_ingestion.start_ingestion_task(task, spark)
+    if is_streaming:
         if "table" in output:
             query = df.writeStream\
                 .format(storage_format) \
@@ -108,26 +107,62 @@ def start_staging_job(spark, config, task, timeout=None):
                 query.awaitTermination(timeout)
         if "view" in output:
             df.createOrReplaceTempView(target)
-    elif type == "batch":
-        df = spark \
-            .read \
-            .format(format) \
-            .option("multiline", "true") \
-            .option("header", "true") \
-            .schema(schema) \
-            .load(landing_path+"/"+location)  
-
+    else:
         if "table" in output:
             df.write.format(storage_format).mode("append").option("overwriteSchema", "true").saveAsTable(target)
         if "file" in output:
             df.write.format(storage_format).mode("append").option("overwriteSchema", "true").save(staging_path+"/"+target)
         if "view" in output:
             df.createOrReplaceTempView(target)
-    else :
-        raise Exception("Invalid type")
+
+
+    # if type == "streaming":
+    #     df = spark \
+    #         .readStream \
+    #         .format(format) \
+    #         .option("multiline", "true") \
+    #         .option("header", "true") \
+    #         .schema(schema) \
+    #         .load(landing_path+"/"+location)    
+
+    #     if "table" in output:
+    #         query = df.writeStream\
+    #             .format(storage_format) \
+    #             .outputMode("append")\
+    #             .option("checkpointLocation", staging_path+"/"+target+"_chkpt")\
+    #             .toTable(target)
+    #         if timeout is not None:
+    #             query.awaitTermination(timeout)
+    #     if "file" in output:
+    #         query = df.writeStream \
+    #             .format(storage_format) \
+    #             .outputMode("append") \
+    #             .option("checkpointLocation", staging_path+"/"+target+"_chkpt") \
+    #             .start(staging_path+"/"+target)
+    #         if timeout is not None:
+    #             query.awaitTermination(timeout)
+    #     if "view" in output:
+    #         df.createOrReplaceTempView(target)
+    # elif type == "batch":
+    #     df = spark \
+    #         .read \
+    #         .format(format) \
+    #         .option("multiline", "true") \
+    #         .option("header", "true") \
+    #         .schema(schema) \
+    #         .load(landing_path+"/"+location)  
+
+    #     if "table" in output:
+    #         df.write.format(storage_format).mode("append").option("overwriteSchema", "true").saveAsTable(target)
+    #     if "file" in output:
+    #         df.write.format(storage_format).mode("append").option("overwriteSchema", "true").save(staging_path+"/"+target)
+    #     if "view" in output:
+    #         df.createOrReplaceTempView(target)
+    # else :
+    #     raise Exception("Invalid type")
         
 
-def start_standard_job(spark, config, task, timeout=None):
+def start_standard_job(spark, config, task, need_load_views=True, timeout=None):
     """Creates the standard job"""
     standard_path = config["standard_path"]
     sql = task["sql"]
@@ -135,7 +170,8 @@ def start_standard_job(spark, config, task, timeout=None):
     if(isinstance(sql, list)):
         sql = " \n".join(sql)
     target = task["target"]
-    load_staging_views(spark, config)
+    if need_load_views:
+        load_staging_views(spark, config)
     df = spark.sql(sql)
     type = "batch"
     if "type" in task:
@@ -170,7 +206,7 @@ def start_standard_job(spark, config, task, timeout=None):
         raise Exception("Invalid type")
 
 
-def start_serving_job(spark, config, task, timeout=None):
+def start_serving_job(spark, config, task, need_load_views=True, timeout=None):
     """Creates the serving job"""
     serving_path = config["serving_path"]
     sql = task["sql"]
@@ -181,8 +217,9 @@ def start_serving_job(spark, config, task, timeout=None):
     type = "batch"
     if "type" in task:
         type = task["type"]
-    load_staging_views(spark, config)
-    load_standard_views(spark, config)
+    if need_load_views:
+        load_staging_views(spark, config)
+        load_standard_views(spark, config)
     df = spark.sql(sql)
     if type == "streaming":
         if "table" in output:
@@ -389,11 +426,40 @@ def load_sample_data(spark, data_str, format="json"):
     # create random table name
     table_name = "tmp_"+str(uuid.uuid4()).replace("-", "")
     df.createOrReplaceTempView("tmp_"+table_name)
-    df = spark.sql("select * from tmp_"+table_name+ " limit "+str(20))
+    df = spark.sql("select * from tmp_"+table_name+ " limit "+str(25))
     data = df.toJSON().map(lambda j: json.loads(j)).collect()
     json_str = json.dumps(data)
     schema = df.schema.json()
     return json_str, schema
 
+
+def init_staging_sample_dataframe(spark, config):
+    staging_path = config["staging_path"]
+    for task in config["staging"]:
+        if 'sampleData' in task:
+            target = task["target"]
+            output = task["output"]
+            task_landing_path = config['landing_path']+"/"+task['name']
+            if not os.path.exists(task_landing_path):
+                os.makedirs(task_landing_path)
+            filename = task['name']+".json"
+            sampleData = task['sampleData']                
+            with open(task_landing_path+"/"+filename, "w") as text_file:
+                json.dump(sampleData, text_file)
+            schema = StructType.fromJson(task["schema"])
+            df = spark \
+                .read \
+                .format("json") \
+                .option("multiline", "true") \
+                .option("header", "true") \
+                .schema(schema) \
+                .load(task_landing_path+"/"+filename)  
+
+            if "table" in output:
+                df.write.format(storage_format).mode("append").option("overwriteSchema", "true").saveAsTable(target)
+            if "file" in output:
+                df.write.format(storage_format).mode("append").option("overwriteSchema", "true").save(staging_path+"/"+target)
+            if "view" in output:
+                df.createOrReplaceTempView(target)
 
 
